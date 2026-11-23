@@ -4,6 +4,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -64,7 +65,9 @@ class SampleVaultTest(unittest.TestCase):
                 p = os.path.join(dp, f)
                 with open(p, "rb") as fh:
                     before[p] = fh.read()
-        for cmd in (["update"], ["search", "pricing"], ["audit"], ["report"], ["tasks"]):
+        for cmd in (["update"], ["search", "pricing"], ["audit"], ["report"], ["tasks"],
+                    ["search", "pricing", "--json"], ["note", "Home", "--json"],
+                    ["audit", "--json"], ["tasks", "--json"]):
             self.cli(*cmd)
         for p, data in before.items():
             with open(p, "rb") as fh:
@@ -225,6 +228,102 @@ class SampleVaultTest(unittest.TestCase):
         self.assertIn("Hub notes", out)
         self.assertIn("Giant notes", out)
         self.assertIn("Pricing Model", out)
+
+    # -------------------------------------------------------------------- JSON
+
+    def json_cli(self, *args, code=0):
+        actual, out, err = self.cli(*args, "--json")
+        self.assertEqual(actual, code, err)
+        def reject_constant(value):
+            self.fail("Invalid JSON constant: %s" % value)
+
+        return json.loads(out, parse_constant=reject_constant)
+
+    def test_search_json(self):
+        results = self.json_cli("search", "fixed fee pricing", "--folder", "Reference",
+                                "--max", "1", "--budget", "1")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["path"], "Reference/Pricing Model.md")
+        self.assertGreater(results[0]["score"], 0)
+        self.assertIn("Fixed fee", [section["heading"] for section in results[0]["sections"]])
+        self.assertEqual(results[0]["excerpts"][0]["line"], 16)
+        self.assertEqual(self.json_cli("search", "fixed fee pricing", "--max", "1",
+                                       "--excerpts", "0")[0]["excerpts"], [])
+        for query in ("the of and", "zzzqqqxxx"):
+            with self.subTest(query=query):
+                self.assertEqual(self.json_cli("search", query), [])
+
+    def test_search_json_nonfinite_scores(self):
+        os.makedirs(self.cache)
+        with open(os.path.join(self.cache, "config.json"), "w", encoding="utf-8") as f:
+            json.dump({"low_weight_folders": {"Reference/": 1e308}}, f)
+
+        results = self.json_cli("search", "pricing", "--max", "3")
+        self.assertEqual([row["path"] for row in results],
+                         ["Reference/Pricing Model.md", "Reference/Invoice Checklist.md",
+                          "Projects/Brand Guidelines.md"])
+        self.assertIsNone(results[0]["score"])
+        self.assertIsNone(results[1]["score"])
+        self.assertGreater(results[2]["score"], 0)
+
+    def test_note_json(self):
+        note = self.json_cli("note", "Pricing Model", "--max-sections", "2")
+        self.assertEqual(note["path"], "Reference/Pricing Model.md")
+        self.assertEqual(note["properties"]["type"], "reference")
+        self.assertIn("pricing", note["tags"])
+        self.assertIn("Reference/Invoice Checklist.md", note["links_to"])
+        self.assertEqual(note["section_count"], 6)
+        self.assertEqual([section["heading"] for section in note["sections"]], ["Pricing Model"])
+        self.assertEqual(note["sections"][0]["start_line"], 7)
+
+    def test_note_json_lookup_errors(self):
+        ambiguous = self.json_cli("note", "Notes", code=3)
+        self.assertEqual(ambiguous["error"], "ambiguous_or_approximate")
+        self.assertEqual(ambiguous["candidates"], ["Clients/Notes.md", "Projects/Notes.md"])
+        missing = self.json_cli("note", "Nonexistent Thing", "--exact", code=4)
+        self.assertEqual(missing["error"], "not_found")
+        self.assertEqual(missing["candidates"], [])
+
+    def test_tasks_json(self):
+        tasks = self.json_cli("tasks", "--until", "2020-01-15", "--match", "wireframes")
+        self.assertEqual(len(tasks), 1)
+        self.assertTrue(tasks[0]["is_open"])
+        self.assertEqual(tasks[0]["due"], "2020-01-15")
+        self.assertEqual(tasks[0]["path"], "Projects/Website Redesign.md")
+        self.assertEqual(tasks[0]["line"], 20)
+        self.assertEqual(self.json_cli("tasks", "--match", "zzzqqqxxx"), [])
+        completed = self.json_cli("tasks", "--done", "--match", "analytics access")
+        self.assertEqual(len(completed), 1)
+        self.assertFalse(completed[0]["is_open"])
+        self.assertIsNone(completed[0]["due"])
+
+    def test_audit_json(self):
+        report = self.json_cli("audit", "--budget", "1")
+        self.assertEqual(report["note_count"], 16)
+        self.assertEqual(report["broken"][0]["target"], "Competitor Teardown")
+        self.assertEqual(report["broken"][0]["occurrences"],
+                         [{"path": "Projects/Website Redesign.md", "line": 33}])
+        self.assertEqual(report["duplicates"][0]["paths"], ["Clients/Notes.md", "Projects/Notes.md"])
+        self.assertEqual(report["bad_frontmatter"][0]["path"], "Inbox/Bad Frontmatter.md")
+        self.assertEqual(report["orphans"], ["Inbox/Loose Thought.md"])
+        self.assertEqual(report["root"], ["Home.md"])
+        self.assertEqual(len(report["overdue"]), 2)
+
+    def test_audit_json_rejects_nonfinite_threshold(self):
+        os.makedirs(self.cache)
+        for literal in ("1e309", "-1e309", "NaN"):
+            with self.subTest(literal=literal):
+                with open(os.path.join(self.cache, "config.json"), "w", encoding="utf-8") as f:
+                    f.write('{"overdue_days":%s}' % literal)
+
+                result = subprocess.run(
+                    [sys.executable, os.path.join(REPO, "vault_graph.py"), "--vault", self.vault,
+                     "--cache-dir", self.cache, "audit", "--json"],
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertEqual(result.stdout, "")
+                self.assertTrue(result.stderr.startswith("Cannot emit JSON: "), result.stderr)
 
     # ------------------------------------------------- incremental and config
 

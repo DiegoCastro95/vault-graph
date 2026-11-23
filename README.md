@@ -83,6 +83,33 @@ Global options: `--vault PATH`, `--cache-dir PATH`. Per command: `--budget N` (a
 Exit codes: `3` = ambiguous note name, `4` = no such note (`note NAME --exact` is a cheap "does this
 note exist?" check for scripts and agents).
 
+### JSON output
+
+Add `--json` after the subcommand to read the result from standard output in a script:
+
+```bash
+vault-graph search "fixed fee pricing" --json
+vault-graph note "Pricing Model" --json
+vault-graph tasks --overdue --json
+vault-graph audit --json
+```
+
+- `search` returns a ranked array with note paths, scores, summaries, matching sections and excerpts.
+  Scores are numbers, or `null` when the computed score is non-finite.
+  `--folder`, `--max` and `--excerpts` still apply.
+- `note` returns an object with metadata, an outline limited by `--max-sections`, incoming and outgoing
+  note paths, and broken links. Failed lookups return an object with `error`, `name` and `candidates`.
+  The exit status is 3 for an ambiguous or approximate match, or 4 when no note is found.
+- `tasks` returns an array of tasks matching the requested filters, with path, section, line, text,
+  `is_open` and `due` (an ISO date or `null`).
+- `audit` returns an object with the audit date, note count, overdue threshold and all findings.
+  Broken-link occurrences include the source path and line.
+  A non-finite overdue threshold makes `audit --json` exit with status 1, an error on standard
+  error and empty standard output.
+
+Paths are relative to the vault. Line numbers start at 1. Search and tasks return `[]` when nothing
+matches. JSON output ignores the text token budget and the audit display limits.
+
 ## Configuration
 
 Optional. Create `<cache-dir>/config.json` (by default `<vault>/.vault-graph/config.json`) with any of:
