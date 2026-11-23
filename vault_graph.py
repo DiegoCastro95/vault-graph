@@ -853,6 +853,21 @@ def read_lines(rel):
     return t.splitlines()
 
 
+def print_json(payload):
+    try:
+        encoded = json.dumps(payload, allow_nan=False)
+    except ValueError as exc:
+        print("Cannot emit JSON: %s" % exc, file=sys.stderr)
+        sys.exit(1)
+    print(encoded)
+
+
+def section_data(section):
+    level, heading, start, end, chars = section
+    return {"level": level, "heading": heading, "start_line": start, "end_line": end,
+            "estimated_tokens": est_tokens(chars)}
+
+
 # ----------------------------------------------------------------------- search
 
 def folder_weight(p, r=None):
@@ -872,7 +887,7 @@ def cmd_search(a):
     notes, paths = idx["notes"], idx["paths"]
     q = list(dict.fromkeys(terms(a.query)))
     if not q:
-        print("The query has no useful terms.")
+        print("[]" if a.json else "The query has no useful terms.")
         return
     only = norm(a.folder) if a.folder else ""
 
@@ -952,23 +967,26 @@ def cmd_search(a):
         scored.append((s, p))
     scored.sort(reverse=True)
     if not scored:
-        print("Nothing found for: %s" % a.query)
+        print("[]" if a.json else "Nothing found for: %s" % a.query)
         return
 
     out_, in_ = neighbours(idx)
     pos = {p: i for i, p in enumerate(paths)}
-    out = Output(a.budget)
-    out.add("Search: %s  (terms: %s)" % (a.query, ", ".join(q)))
+    results = []
+    out = None if a.json else Output(a.budget)
+    if out is not None:
+        out.add("Search: %s  (terms: %s)" % (a.query, ", ".join(q)))
     for k, (s, p) in enumerate(scored[: a.max]):
         r = notes[p]
-        out.add("")
-        info = short_info(r)
-        ok = out.add("[%d] %s  (%s · %d lines%s)" % (k + 1, p, fmt_tokens(est_tokens(r["ch"])), r["nl"],
-                                                    (" · " + info) if info else ""))
-        if not ok:
-            break
-        if r["sm"]:
-            out.add("    summary: " + r["sm"][:180])
+        if out is not None:
+            out.add("")
+            info = short_info(r)
+            ok = out.add("[%d] %s  (%s · %d lines%s)" % (
+                k + 1, p, fmt_tokens(est_tokens(r["ch"])), r["nl"], (" · " + info) if info else ""))
+            if not ok:
+                break
+            if r["sm"]:
+                out.add("    summary: " + r["sm"][:180])
         # sections whose heading matches the query
         hits = []
         for sec in r["sec"]:
@@ -979,9 +997,11 @@ def cmd_search(a):
         if any(h[2][0] > 1 for h in hits):
             hits = [h for h in hits if h[2][0] > 1]
         hits.sort(key=lambda x: (-x[0], x[1]))
-        if hits:
+        sections = [h[2] for h in hits[:3]]
+        if out is not None and sections:
             out.add("    sections: " + " · ".join('"%s" L%d-%d (%s)' % (
-                h[2][1][:60], h[2][2], h[2][3], fmt_tokens(est_tokens(h[2][4]))) for h in hits[:3]))
+                sec[1][:60], sec[2], sec[3], fmt_tokens(est_tokens(sec[4]))) for sec in sections))
+        excerpts = []
         # body excerpts (top notes only: this reads the file)
         if k < a.excerpts and (not hits or k < 2):
             try:
@@ -996,16 +1016,28 @@ def cmd_search(a):
                     if n_ok:
                         cand.append((n_ok, -i, i))
                 cand.sort(reverse=True)
-                for n_ok, _, i in cand[:2]:
-                    out.add("    L%d: %s" % (i + 1, clean_md(lines[i])[:150]))
+                for _, _, i in cand[:2]:
+                    excerpt = clean_md(lines[i])[:150]
+                    if out is None:
+                        excerpts.append({"line": i + 1, "text": excerpt})
+                    else:
+                        out.add("    L%d: %s" % (i + 1, excerpt))
             except OSError:
                 pass
-        if k < 3:
+        if out is None:
+            results.append({"path": p, "name": r["n"], "score": s if math.isfinite(s) else None,
+                            "summary": r["sm"],
+                            "line_count": r["nl"], "estimated_tokens": est_tokens(r["ch"]),
+                            "sections": [section_data(sec) for sec in sections], "excerpts": excerpts})
+        elif k < 3:
             i = pos[p]
             nb = [paths[b] for b, *_ in out_.get(i, [])] + [paths[b] for b, *_ in in_.get(i, [])]
             if nb:
                 names = list(dict.fromkeys(notes[v]["n"] for v in nb))
                 out.add("    linked to: " + ", ".join(names[:8]) + (" (+%d)" % (len(names) - 8) if len(names) > 8 else ""))
+    if out is None:
+        print_json(results)
+        return
     out.add("")
     out.add('Next: vault-graph section "<note>" "<heading>"  or  vault-graph note "<note>"')
     out.print()
@@ -1017,18 +1049,48 @@ def cmd_note(a):
     idx = load(a.fast)
     p, cands = find_note(idx, a.name, exact=a.exact)
     if not p:
+        if a.json:
+            print_json({"error": "ambiguous_or_approximate" if cands else "not_found",
+                        "name": a.name, "candidates": cands})
+            sys.exit(3 if cands else 4)
         fail_note(a.name, cands)
     notes, paths = idx["notes"], idx["paths"]
     r = notes[p]
     pos = paths.index(p)
     out_, in_ = neighbours(idx)
+    c = idx["com"].get(str(pos))
+    label = idx["label"].get(str(c), "")
+    props = {k: v for k, v in r["fm"].items() if k != "summary"}
+    open_tasks = [t for t in r["tf"] if t[1]]
+    secs = r["sec"]
+    max_level = 6
+    if len(secs) > a.max_sections:
+        for lv in range(1, 7):
+            if sum(1 for sec in secs if sec[0] <= lv) > a.max_sections:
+                max_level = max(1, lv - 1)
+                break
+    shown = [sec for sec in secs if sec[0] <= max_level][: a.max_sections]
+    to_ = list(dict.fromkeys(paths[b] for b, *_ in out_.get(pos, [])))
+    from_ = list(dict.fromkeys(paths[b] for b, *_ in in_.get(pos, [])))
+    qb = [q for q in idx["broken"] if q[0] == pos]
+    if a.json:
+        print_json({
+            "name": r["n"], "path": p, "summary": r["sm"], "line_count": r["nl"],
+            "size_bytes": r["sz"], "estimated_tokens": est_tokens(r["ch"]),
+            "community": {"id": c, "label": label} if c is not None else None,
+            "properties": props, "tags": r["tg"], "inline_field_lines": r["fl"],
+            "open_tasks": len(open_tasks), "done_tasks": len(r["tf"]) - len(open_tasks),
+            "frontmatter_problems": r["fmp"], "section_count": len(secs),
+            "sections": [section_data(sec) for sec in shown],
+            "links_to": to_, "linked_from": from_,
+            "broken_links": [{"target": target, "line": line} for _, target, line in qb],
+        })
+        return
     out = Output(a.budget)
     out.add("Note: %s" % r["n"])
     out.add("Path: %s  (%s · %d lines · %d KB)" % (p, fmt_tokens(est_tokens(r["ch"])), r["nl"], r["sz"] // 1024))
-    c = idx["com"].get(str(pos))
     if c is not None:
-        out.add("Community %s: %s" % (c, idx["label"].get(str(c), "")))
-    props = {k: v for k, v in r["fm"].items() if k != "summary"}
+        out.add("Community %s: %s" % (c, label))
     if props:
         out.add("Properties: " + "; ".join("%s=%s" % (k, ",".join(v) if isinstance(v, list) else v)
                                            for k, v in list(props.items())[:10])[:400])
@@ -1036,7 +1098,6 @@ def cmd_note(a):
         out.add("Summary: " + r["sm"])
     if r["tg"]:
         out.add("Tags: " + ", ".join("#" + t for t in sorted(r["tg"], key=lambda t: -r["tg"][t])[:10]))
-    open_tasks = [t for t in r["tf"] if t[1]]
     extras = []
     if r["tf"]:
         extras.append("%d open / %d done tasks" % (len(open_tasks), len(r["tf"]) - len(open_tasks)))
@@ -1047,15 +1108,7 @@ def cmd_note(a):
     if extras:
         out.add(" · ".join(extras))
     out.add("")
-    secs = r["sec"]
     if secs:
-        max_level = 6
-        if len(secs) > a.max_sections:
-            for lv in range(1, 7):
-                if sum(1 for s in secs if s[0] <= lv) > a.max_sections:
-                    max_level = max(1, lv - 1)
-                    break
-        shown = [s for s in secs if s[0] <= max_level][: a.max_sections]
         out.add("Outline (%d sections%s):" % (len(secs), "" if len(shown) == len(secs)
                                               else ", showing down to level %d" % max_level))
         for s in shown:
@@ -1064,13 +1117,10 @@ def cmd_note(a):
     else:
         out.add("No headings (running text).")
     out.add("")
-    to_ = list(dict.fromkeys(paths[b] for b, *_ in out_.get(pos, [])))
-    from_ = list(dict.fromkeys(paths[b] for b, *_ in in_.get(pos, [])))
     if to_:
         out.add("Links to (%d): %s" % (len(to_), ", ".join(notes[x]["n"] for x in to_[:25]) + (" ..." if len(to_) > 25 else "")))
     if from_:
         out.add("Linked from (%d): %s" % (len(from_), ", ".join(notes[x]["n"] for x in from_[:25]) + (" ..." if len(from_) > 25 else "")))
-    qb = [q for q in idx["broken"] if q[0] == pos]
     if qb:
         out.add("Broken links here: " + ", ".join("[[%s]] L%d" % (q[1], q[2]) for q in qb[:8]))
     out.print()
@@ -1178,6 +1228,13 @@ def cmd_tasks(a):
                 continue
             items.append((due or "9999", p, sec, ln, is_open, txt))
     items.sort(key=lambda x: (x[0] if (until or a.overdue) else "", x[1], x[3]))
+    if a.json:
+        print_json([
+            {"path": p, "section": sec, "line": ln, "is_open": bool(is_open),
+             "text": txt, "due": None if due == "9999" else due}
+            for due, p, sec, ln, is_open, txt in items
+        ])
+        return
     out = Output(a.budget)
     out.add("Tasks %s: %d%s" % ("open" if not a.done else "(open and done)", len(items),
                                 (" · due until %s" % until.isoformat()) if until else (" · overdue" if a.overdue else "")))
@@ -1318,6 +1375,18 @@ def audit(idx):
 def cmd_audit(a):
     idx = load(a.fast)
     r = audit(idx)
+    if a.json:
+        print_json({
+            "date": today().isoformat(), "note_count": len(idx["paths"]),
+            "broken": [{"target": target, "occurrences": [{"path": p, "line": ln} for p, ln in occ]}
+                       for target, occ in r["broken"]],
+            "duplicates": [{"name": name, "paths": paths} for name, paths in r["duplicates"]],
+            "bad_frontmatter": [{"path": p, "problems": problems} for p, problems in r["bad_frontmatter"]],
+            "no_summary": r["no_summary"], "overdue_days": CFG["overdue_days"],
+            "overdue": [{"due": due, "path": p, "text": txt, "line": ln} for due, p, txt, ln in r["overdue"]],
+            "root": r["root"], "orphans": r["orphans"],
+        })
+        return
     out = Output(a.budget if not a.all else 10 ** 7)
     total = sum(len(v) for _, v in r["broken"])
     out.add("VAULT AUDIT — %s · %d notes" % (today().isoformat(), len(idx["paths"])))
@@ -1445,12 +1514,14 @@ def build_parser():
         return sp
 
     sp = new("search", cmd_search, "notes and sections that answer a question")
+    sp.add_argument("--json", action="store_true", help="emit structured JSON")
     sp.add_argument("query")
     sp.add_argument("--folder", help="restrict to paths containing this text (e.g. 'Projects')")
     sp.add_argument("--max", type=int, default=8)
     sp.add_argument("--excerpts", type=int, default=4, help="how many top notes also get body excerpts")
 
     sp = new("note", cmd_note, "summary, outline with line ranges and links of a note")
+    sp.add_argument("--json", action="store_true", help="emit structured JSON")
     sp.add_argument("name")
     sp.add_argument("--max-sections", type=int, default=45)
     sp.add_argument("--exact", action="store_true", help="exact name only (exit code 4 = no such note)")
@@ -1465,6 +1536,7 @@ def build_parser():
     sp.add_argument("--limit", type=int, default=3000, help="tokens above which a subsection is requested")
 
     sp = new("tasks", cmd_tasks, "open tasks ([ ] items), optionally with due dates")
+    sp.add_argument("--json", action="store_true", help="emit structured JSON")
     sp.add_argument("--match", help="text in the heading, path, text or area/project properties")
     sp.add_argument("--folder")
     sp.add_argument("--until", help="today, tomorrow, +N or YYYY-MM-DD (only tasks with a due date)")
@@ -1485,6 +1557,7 @@ def build_parser():
     sp.add_argument("b")
 
     sp = new("audit", cmd_audit, "vault health: broken links, duplicates, frontmatter, orphans")
+    sp.add_argument("--json", action="store_true", help="emit structured JSON")
     sp.add_argument("--all", action="store_true")
 
     new("report", cmd_report, "overview of the vault")
