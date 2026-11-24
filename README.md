@@ -69,7 +69,7 @@ Try it on the bundled demo vault: `vault-graph --vault examples/sample-vault --c
 | `search "question"` | Ranked notes and sections. Scores name/alias, summary, tags, headings, frontmatter, folder and body text (BM25-like), then shows matching sections and excerpts. |
 | `note "Name"` | One note: summary, properties, outline with line ranges and token sizes, links in and out, community. |
 | `section "Note" "Heading"` | Prints only that section. Large sections list their subsections instead; `--lines A-B`, `--tail N` (to append at the end of a note) and `--numbers` are available. |
-| `tasks` | Open `- [ ]` tasks across the vault, grouped by heading. Filters: `--match`, `--folder`, `--until tomorrow`, `--overdue`, `--done`. Due dates are read from `due 2026-03-01`, `deadline 2026-03-01` or `📅 2026-03-01`. |
+| `tasks` | Open `- [ ]` tasks across the vault, grouped by heading. Filters: `--match`, `--folder`, `--until tomorrow`, `--overdue`, `--done`. Due dates are read from `due 2026-03-01`, `deadline 2026-03-01`, `📅 2026-03-01`, `[due:: 2026-03-01]` or `(due:: 2026-03-01)`. |
 | `recent --days 7` | Notes modified recently. |
 | `changed` | What each index update added, changed or removed. |
 | `path "A" "B"` | Shortest chain of links between two notes. |

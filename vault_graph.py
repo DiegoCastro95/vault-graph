@@ -38,7 +38,7 @@ from collections import Counter, defaultdict, deque
 
 __version__ = "0.1.0"
 
-INDEX_FORMAT = 1
+INDEX_FORMAT = 2
 CHARS_PER_TOKEN = 3.5  # rough estimate used everywhere a token count is shown
 DEFAULT_BUDGET = 1200  # approximate tokens per query answer
 
@@ -245,7 +245,7 @@ RE_INLINE_CODE = re.compile(r"(`+)(?:(?!\1).)+?\1")
 RE_LINK = re.compile(r"(!?)\[\[([^\[\]\n]+?)\]\]")
 RE_TAG = re.compile(r"(?<![\w/&#:='\"(\[\]`.\-])#([^\s#\[\]{}(),.;:!?\"'`|<>*=+\\]+)")
 RE_TASK = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\[(.)\]\s+(.*)$")
-RE_DUE = re.compile(r"(?:due|deadline|\U0001F4C5)\s*:?\s*(\d{4}-\d{2}-\d{2})", re.I)
+RE_DUE = re.compile(r"(?:due\s*::|(?:due|deadline|\U0001F4C5)\s*:?)\s*(\d{4}-\d{2}-\d{2})", re.I)
 RE_FM_KEY = re.compile(r"^([^\s:#\-][^:]*?):(?:\s+(.*)|\s*)$")
 
 

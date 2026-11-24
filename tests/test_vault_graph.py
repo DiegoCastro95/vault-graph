@@ -190,6 +190,39 @@ class SampleVaultTest(unittest.TestCase):
         self.assertIn("Send revised wireframes", out)
         self.assertNotIn("invoice number follows", out)
 
+    def test_tasks_dataview_due_filters_refresh_old_index(self):
+        path = os.path.join(self.vault, "Inbox", "Dataview Tasks.md")
+        text = ("# Dataview Tasks\n"
+                "- [ ] bracket [due:: 2020-01-01]\n"
+                "- [ ] parens (due:: 2020-01-02)\n"
+                "- [ ] future [due:: 2999-01-01]\n"
+                "- [ ] scheduled \U0001F4C6 2020-01-01\n"
+                "- [ ] started \U0001F6EB 2020-01-01\n")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        # A format-1 index did not extract double-colon dates. Keep its file
+        # hashes and timestamps intact so only format invalidation refreshes it.
+        self.cli("update")
+        old_index = self.index()
+        old_index["format"] = 1
+        for task in old_index["notes"]["Inbox/Dataview Tasks.md"]["tf"]:
+            task[4] = ""
+        for args in (("--until", "2020-01-02"), ("--overdue",)):
+            with self.subTest(args=args):
+                with open(os.path.join(self.cache, "index.json"), "w", encoding="utf-8") as f:
+                    json.dump(old_index, f)
+                code, out, err = self.cli("tasks", *args, "--match", "Dataview Tasks")
+                self.assertEqual(code, 0)
+                self.assertEqual(err, "")
+                self.assertIn("Tasks open: 2", out)
+                self.assertIn("bracket", out)
+                self.assertIn("parens", out)
+                for excluded in ("future", "scheduled", "started"):
+                    self.assertNotIn(excluded, out)
+                self.assertEqual(self.index()["format"], vg.INDEX_FORMAT)
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), text)
+
     def test_tasks_done_flag(self):
         _, out, _ = self.cli("tasks", "--done", "--match", "Kickoff")
         self.assertIn("[x] Priya shares analytics access", out)
@@ -335,6 +368,22 @@ empty:
         rec, _ = vg.extract("x.md", "- [ ] pay rent due 2026-03-01\n- [x] done\n- [/] doing \U0001F4C5 2026-04-02\n- [-] dropped\n")
         self.assertEqual([(t[1], t[4]) for t in rec["tf"]],
                          [(1, "2026-03-01"), (0, ""), (1, "2026-04-02"), (0, "")])
+
+    def test_extract_task_dataview_due_dates(self):
+        for field in ("[due:: 2026-03-01]", "(due:: 2026-03-01)",
+                      "[DUE::2026-03-01]", "(due::2026-03-01)"):
+            with self.subTest(field=field):
+                rec, _ = vg.extract("x.md", "- [ ] task " + field + "\n")
+                self.assertEqual(rec["tf"][0][4], "2026-03-01")
+        for field in ("due 2026-03-01", "due: 2026-03-01",
+                      "deadline 2026-03-01", "\U0001F4C5 2026-03-01"):
+            with self.subTest(field=field):
+                rec, _ = vg.extract("x.md", "- [ ] task " + field + "\n")
+                self.assertEqual(rec["tf"][0][4], "2026-03-01")
+        for field in ("\U0001F4C6 2026-03-01", "\U0001F6EB 2026-03-01"):
+            with self.subTest(field=field):
+                rec, _ = vg.extract("x.md", "- [ ] task " + field + "\n")
+                self.assertEqual(rec["tf"][0][4], "")
 
     def test_section_ranges_nest_correctly(self):
         rec, _ = vg.extract("x.md", "# A\ntext\n## B\nmore\n## C\nend\n# D\nlast\n")
